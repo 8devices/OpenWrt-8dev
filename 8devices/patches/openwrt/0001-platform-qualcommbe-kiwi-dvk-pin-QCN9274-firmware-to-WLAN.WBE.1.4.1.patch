@@ -1,0 +1,101 @@
+From: Robertas Tumas <robertas.t@8devices.com>
+Date: Thu, 1 Oct 2026 10:00:00 +0000
+Subject: [PATCH] qualcommbe: kiwi-dvk: pin QCN9274 firmware to WLAN.WBE.1.4.1
+
+linux-firmware ships QCN9274 WLAN.WBE.1.6-01243 since 2026-01-30. On the
+upstream ath12k driver (backports 7.2 on kernel 6.18) that build never
+starts the 8devices Noni QCN9274 cards (WMI unified ready timeout), with
+the upstream board file, with the vendor's 1.6 board data and with the
+vendor's own 1.6.r1-00396 build alike, and it leaves the Kiwi SoM radio
+without regulatory rules when used with the upstream board file.
+WLAN.WBE.1.4.1-00199 (linux-firmware 20250613) works for every radio.
+
+Add ath12k-firmware-qcn9274-wbe141, a hash-pinned download of the
+linux-firmware 20250613 tarball installing only the QCN9274 blobs, as a
+PROVIDES/CONFLICTS replacement for ath12k-firmware-qcn9274, and select
+it for the Kiwi-DVK. Shipping the blob through a package instead of a
+files/ overlay keeps the image SBOM truthful about the firmware version.
+
+Revisit when a public 1.6 build starts the Noni cards.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Robertas Tumas <robertas.t@8devices.com>
+---
+diff --git a/package/firmware/ath12k-firmware-qcn9274-wbe141/Makefile b/package/firmware/ath12k-firmware-qcn9274-wbe141/Makefile
+new file mode 100644
+index 0000000000..2abe52c058
+--- /dev/null
++++ b/package/firmware/ath12k-firmware-qcn9274-wbe141/Makefile
+@@ -0,0 +1,59 @@
++#
++# Copyright (C) 2026 8devices
++#
++# This is free software, licensed under the GNU General Public License v2.
++# See /LICENSE for more information.
++#
++# QCN9274 ath12k firmware pinned to WLAN.WBE.1.4.1-00199 (linux-firmware
++# 20250613). linux-firmware ships WLAN.WBE.1.6-01243 since 2026-01-30; on the
++# upstream ath12k driver that build never starts the 8devices Noni (QCN9274)
++# cards (WMI ready timeout) and leaves the Kiwi SoM radio without regulatory
++# rules when used with the upstream board file. 1.4.1 works for every radio.
++# The package replaces ath12k-firmware-qcn9274 for boards that need it, so
++# the image SBOM records the firmware version actually shipped.
++#
++
++include $(TOPDIR)/rules.mk
++
++PKG_NAME:=ath12k-firmware-qcn9274-wbe141
++PKG_VERSION:=20250613
++PKG_RELEASE:=1
++
++PKG_SOURCE_URL:=@KERNEL/linux/kernel/firmware
++PKG_SOURCE:=linux-firmware-$(PKG_VERSION).tar.xz
++PKG_HASH:=d40743337ca8bf9d2587e220ab30dec6a07b52cc5cb4a4ff8d92be14391a7fde
++PKG_BUILD_DIR:=$(BUILD_DIR)/linux-firmware-$(PKG_VERSION)
++
++PKG_MAINTAINER:=8devices <support@8devices.com>
++PKG_LICENSE_FILES:=LICENSE.QualcommAtheros_ath10k
++
++include $(INCLUDE_DIR)/package.mk
++
++RSTRIP:=:
++STRIP:=:
++
++define Package/ath12k-firmware-qcn9274-wbe141
++  SECTION:=firmware
++  CATEGORY:=Firmware
++  URL:=https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git
++  TITLE:=QCN9274 ath12k firmware WLAN.WBE.1.4.1-00199
++  PROVIDES:=ath12k-firmware-qcn9274
++  CONFLICTS:=ath12k-firmware-qcn9274
++endef
++
++define Package/ath12k-firmware-qcn9274-wbe141/description
++QCN9274 firmware from linux-firmware 20250613 (WLAN.WBE.1.4.1-00199).
++Drop-in replacement for ath12k-firmware-qcn9274 on boards whose radios do
++not start with the 1.6 firmware shipped by current linux-firmware.
++endef
++
++define Build/Compile
++endef
++
++define Package/ath12k-firmware-qcn9274-wbe141/install
++	$(INSTALL_DIR) $(1)/lib/firmware/ath12k/QCN9274/hw2.0
++	$(INSTALL_DATA) \
++		$(PKG_BUILD_DIR)/ath12k/QCN9274/hw2.0/* $(1)/lib/firmware/ath12k/QCN9274/hw2.0/
++endef
++
++$(eval $(call BuildPackage,ath12k-firmware-qcn9274-wbe141))
+diff --git a/target/linux/qualcommbe/image/ipq95xx.mk b/target/linux/qualcommbe/image/ipq95xx.mk
+index 3adaeaad48..fd2a31b306 100644
+--- a/target/linux/qualcommbe/image/ipq95xx.mk
++++ b/target/linux/qualcommbe/image/ipq95xx.mk
+@@ -7,7 +7,7 @@ define Device/8devices_kiwi-dvk
+ 	DEVICE_MODEL := Kiwi-DVK
+ 	DEVICE_DTS_CONFIG := config@8dev-kiwi
+ 	SOC := ipq9570
+-	DEVICE_PACKAGES := kmod-ath12k ath12k-firmware-qcn9274 \
++	DEVICE_PACKAGES := kmod-ath12k ath12k-firmware-qcn9274-wbe141 \
+ 		ipq-wifi-8devices_kiwi f2fsck mkf2fs kmod-sfp \
+ 		kmod-phy-maxlinear kmod-phy-realtek rtl826x-firmware
+ 	IMAGE/factory.bin := qsdk-ipq-factory-nor

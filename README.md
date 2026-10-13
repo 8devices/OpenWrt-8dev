@@ -1,3 +1,19 @@
+# 8devices OpenWrt CRA/RED baseline
+
+Upstream OpenWrt main pinned at 138fabb79f (2026-09-29), plus the `8devices/`
+overlay, `quick_start.sh` and this section of the README. No other upstream
+file is changed in git. The 8devices changes are quilt patch series kept in
+`8devices/`; quick_start applies them to the working tree before the build,
+which does modify upstream files there, and `make -C 8devices unapply`
+restores the pristine tree.
+
+    ./quick_start.sh            # pick a board config, apply the overlay, check the signing key
+    make -j$(nproc)
+
+Everything else (boards, keys, security defaults, re-pin): `8devices/README.md`.
+
+---
+
 ![OpenWrt logo](include/logo.png)
 
 OpenWrt Project is a Linux operating system targeting embedded devices. Instead

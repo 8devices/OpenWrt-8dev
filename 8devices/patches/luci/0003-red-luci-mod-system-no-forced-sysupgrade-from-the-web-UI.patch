@@ -1,0 +1,43 @@
+From: Robertas Tumas <robertas.t@8devices.com>
+Subject: [PATCH] luci-mod-system: no forced sysupgrade from the web UI
+
+The flash ACL (luci-mod-system-flash) let the web UI run every
+"sysupgrade --force" variant. On 8devices boards sysupgrade enforces the
+image signature (8devices openwrt series), but --force overrides that
+check together with the device match: the validator marks a bad
+signature as "invalid", and invalid images are forceable. So the "Force
+upgrade" checkbox let anyone with the web password flash an unsigned
+image for any device over the network (EN 18031-1 SUM-2, EN 303 645
+5.3-10). The five --force exec entries are removed; the regular, -n, -k
+and -u variants stay, so a signed image for this board still flashes
+from the web UI, and a ticked checkbox now yields an rpcd error.
+sysupgrade -F from a root shell on the serial console is untouched and
+remains the documented recovery path.
+
+This is hardening of the web path, not a boundary against the web
+administrator, who can still reach root through other LuCI pages
+(startup script, crontab, dropbear settings); see
+8devices/docs/sysupgrade-signing.md, "Threat model".
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Robertas Tumas <robertas.t@8devices.com>
+---
+ .../root/usr/share/rpcd/acl.d/luci-mod-system.json            |  5 -----
+ 1 file changed, 5 deletions(-)
+
+diff --git a/modules/luci-mod-system/root/usr/share/rpcd/acl.d/luci-mod-system.json b/modules/luci-mod-system/root/usr/share/rpcd/acl.d/luci-mod-system.json
+index ce8437f..b0eb908 100644
+--- a/modules/luci-mod-system/root/usr/share/rpcd/acl.d/luci-mod-system.json
++++ b/modules/luci-mod-system/root/usr/share/rpcd/acl.d/luci-mod-system.json
+@@ -189,11 +189,6 @@
+ 				"/etc/sysupgrade.conf": [ "write" ],
+ 				"/sbin/firstboot -r -y": [ "exec" ],
+ 				"/sbin/reboot": [ "exec" ],
+-				"/sbin/sysupgrade --force /tmp/firmware.bin": [ "exec" ],
+-				"/sbin/sysupgrade -n --force /tmp/firmware.bin": [ "exec" ],
+-				"/sbin/sysupgrade --force -k /tmp/firmware.bin": [ "exec" ],
+-				"/sbin/sysupgrade --force -u /tmp/firmware.bin": [ "exec" ],
+-				"/sbin/sysupgrade --force -u -k /tmp/firmware.bin": [ "exec" ],
+ 				"/sbin/sysupgrade -n /tmp/firmware.bin": [ "exec" ],
+ 				"/sbin/sysupgrade -k /tmp/firmware.bin": [ "exec" ],
+ 				"/sbin/sysupgrade -u /tmp/firmware.bin": [ "exec" ],
