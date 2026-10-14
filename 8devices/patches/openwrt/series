@@ -1,0 +1,5 @@
+0001-platform-qualcommbe-kiwi-dvk-pin-QCN9274-firmware-to-WLAN.WBE.1.4.1.patch
+0002-red-base-files-operator-account-console-login-and-initial-console-password.patch
+0003-red-network-access-SSH-whitelist-no-login-without-password-password-policy-HTTPS.patch
+0004-red-sysupgrade-signed-images-enforced.patch
+0005-red-image-record-the-overlay-patches-in-the-CycloneDX-SBOM.patch

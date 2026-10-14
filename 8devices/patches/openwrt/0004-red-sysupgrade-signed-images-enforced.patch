@@ -1,0 +1,304 @@
+From: Robertas Tumas <robertas.t@8devices.com>
+Subject: [PATCH] sysupgrade: signed images, enforced
+
+The device-side authenticity check of the firmware update path
+(EN 18031-1 SUM-2). Design and threat model:
+8devices/docs/sysupgrade-signing.md.
+
+The signing key is upstream's: key-build in the tree root, generated on
+the first build, gitignored, its public half installed into every image.
+Whoever builds owns the key; nothing is committed and nothing is shipped
+by 8devices.
+
+- APK fix: SIGN_FIRMWARE is enabled in every 8devices config, but on an
+  APK based tree base-files only generates the usign key pair and its
+  ucert certificate in the opkg branch of its Makefile, so
+  Build/append-metadata never found $(BUILD_KEY) and silently produced
+  unsigned images; ucert was not installed and /etc/opkg/keys did not
+  exist, so nothing on the device verified anything. The key pair is
+  now generated on APK builds too, ucert is pulled in by SIGN_FIRMWARE,
+  and the usign public key is installed into /etc/opkg/keys. Probably an
+  upstream regression from the opkg to APK move.
+- Enforcement: new REQUIRE_IMAGE_SIGNATURE option (default y, in the
+  configs). base-files ships /lib/upgrade/signature.sh with
+  REQUIRE_IMAGE_SIGNATURE=1, sourced after platform.sh by "include
+  /lib/upgrade", so sysupgrade refuses an image whose signature is
+  missing, invalid or made with an unknown key on every target built
+  from this tree; "sysupgrade -F" keeps the console override. Off:
+  upstream behaviour, so a development image without signing keeps a
+  working LuCI update path.
+- Backup restore: sysupgrade --restore-backup snapshots /etc/opkg/keys
+  and /etc/apk/keys and puts them back afterwards (-F skips this), so
+  an uploaded backup, which the LuCI flash ACL lets the web
+  administrator restore, cannot add, replace or remove trust keys. This
+  binds the backup path only; the web administrator can still reach
+  root through other LuCI pages, see the threat model in the document.
+- Certificate validity: ucert (package patch) -I takes -f <epoch> and
+  -e <epoch> (validfrom, expiresat) instead of the fixed "now + 365
+  days", and base-files issues the build key's certificate with
+  validfrom 2025-01-01 and a ten-year lifetime. ucert -V checks the
+  window against the device clock; a device without RTC and NTP sits at
+  the build date of the firmware it runs and would reject a certificate
+  issued later as not yet valid, and the one-year default would make
+  every image carrying the certificate unflashable after a year.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Robertas Tumas <robertas.t@8devices.com>
+---
+--- a/config/Config-build.in
++++ b/config/Config-build.in
+@@ -92,6 +92,17 @@ menu "Global build settings"
+ 		  their authenticity before flashing. OpenWrt's build infrastructure
+ 		  signs images with temporary keys; disabling this drops the signature.
+ 
++	config REQUIRE_IMAGE_SIGNATURE
++		bool "Require a valid signature for sysupgrade images"
++		depends on SIGN_FIRMWARE
++		default y
++		help
++		  Ship /lib/upgrade/signature.sh so that sysupgrade refuses images
++		  whose signature is missing, invalid or made with a key that is not
++		  in /etc/opkg/keys. "sysupgrade -F" on the console overrides the
++		  check. Disable for development images that are flashed from
++		  arbitrary trees.
++
+ 	comment "General build options"
+ 
+ 	config TESTING_KERNEL
+--- a/package/base-files/Makefile
++++ b/package/base-files/Makefile
+@@ -40,7 +40,7 @@ define Package/base-files
+   SECTION:=base
+   CATEGORY:=Base system
+   DEPENDS:= \
+-	+netifd +libc +jsonfilter +SIGNED_PACKAGES:usign +SIGNED_PACKAGES:openwrt-keyring \
++	+netifd +libc +jsonfilter +SIGNED_PACKAGES:usign +SIGNED_PACKAGES:openwrt-keyring +SIGN_FIRMWARE:ucert \
+ 	+NAND_SUPPORT:ubi-utils +fstools +fwtool \
+ 	+SELINUX:procd-selinux +!SELINUX:procd +USE_SECCOMP:procd-seccomp \
+ 	+SELINUX:busybox-selinux +!SELINUX:busybox \
+@@ -120,11 +120,42 @@ define Build/Compile/Default
+ endef
+ Build/Compile = $(Build/Compile/Default)
+ 
++# 8devices: the usign public key sysupgrade trusts (the build key), stored
++# under its fingerprint as fwtool.sh / ucert -P expect. Shared by the APK and
++# the opkg branch below.
++define Package/base-files/install-usign-keys
++	mkdir -p $(1)/etc/opkg/keys
++	$(CP) $(BUILD_KEY).pub $(1)/etc/opkg/keys/`$(STAGING_DIR_HOST)/bin/usign -F -p $(BUILD_KEY).pub`
++endef
++
++# 8devices: certificate validity for the generated build key. ucert -V checks
++# validfrom/expiresat against the device clock; a device without RTC and NTP
++# runs at the build date of its current firmware, so validfrom must lie before
++# any firmware in the field (2025-01-01), and the one-year upstream default
++# would make images unflashable after a year (ten years here). Delete
++# $(BUILD_KEY).ucert to re-issue.
++UCERT_VALIDITY := -f 1735689600 -e $$$$(($$$$(date +%s) + 10 * 365 * 86400))
++
+ ifneq ($(CONFIG_USE_APK),)
++ifdef CONFIG_SIGN_FIRMWARE
++  # 8devices: generate the usign key pair and its certificate as the opkg
++  # branch does; upstream skipped this on APK trees, so SIGN_FIRMWARE
++  # silently produced unsigned images.
++  define Build/Configure
++	[ -s $(BUILD_KEY) -a -s $(BUILD_KEY).pub ] || \
++		$(STAGING_DIR_HOST)/bin/usign -G -s $(BUILD_KEY) -p $(BUILD_KEY).pub -c "Local build key"
++
++	[ -s $(BUILD_KEY).ucert ] || \
++		$(STAGING_DIR_HOST)/bin/ucert -I -c $(BUILD_KEY).ucert -p $(BUILD_KEY).pub -s $(BUILD_KEY) $(UCERT_VALIDITY)
++
++  endef
++endif
++
+ ifndef CONFIG_BUILDBOT
+   define Package/base-files/install-key
+ 	mkdir -p $(1)/etc/apk/keys
+ 	$(CP) $(BUILD_KEY_APK_PUB) $(1)/etc/apk/keys/
++	$(if $(CONFIG_SIGN_FIRMWARE),$(Package/base-files/install-usign-keys))
+   endef
+ endif
+ else
+@@ -134,19 +165,26 @@ ifdef CONFIG_SIGNED_PACKAGES
+ 		$(STAGING_DIR_HOST)/bin/usign -G -s $(BUILD_KEY) -p $(BUILD_KEY).pub -c "Local build key"
+ 
+ 	[ -s $(BUILD_KEY).ucert ] || \
+-		$(STAGING_DIR_HOST)/bin/ucert -I -c $(BUILD_KEY).ucert -p $(BUILD_KEY).pub -s $(BUILD_KEY)
++		$(STAGING_DIR_HOST)/bin/ucert -I -c $(BUILD_KEY).ucert -p $(BUILD_KEY).pub -s $(BUILD_KEY) $(UCERT_VALIDITY)
+ 
+   endef
+ 
+ ifndef CONFIG_BUILDBOT
+   define Package/base-files/install-key
+-	mkdir -p $(1)/etc/opkg/keys
+-	$(CP) $(BUILD_KEY).pub $(1)/etc/opkg/keys/`$(STAGING_DIR_HOST)/bin/usign -F -p $(BUILD_KEY).pub`
++	$(Package/base-files/install-usign-keys)
+   endef
+ endif
+ endif
+ endif
+ 
++# 8devices: /lib/upgrade/signature.sh makes sysupgrade require a valid image
++# signature; ship it only when REQUIRE_IMAGE_SIGNATURE is set.
++ifeq ($(CONFIG_REQUIRE_IMAGE_SIGNATURE),)
++  define Package/base-files/signature-check
++	rm -f $(1)/lib/upgrade/signature.sh
++  endef
++endif
++
+ ifeq ($(CONFIG_NAND_SUPPORT),)
+   define Package/base-files/nand-support
+ 	rm -f $(1)/lib/upgrade/nand.sh
+@@ -172,6 +210,7 @@ define Package/base-files/install
+ 	$(Package/base-files/nand-support)
+ 	$(Package/base-files/legacy-sdcard-support)
+ 	$(Package/base-files/emmc-support)
++	$(Package/base-files/signature-check)
+ 	if [ -d $(GENERIC_PLATFORM_DIR)/base-files/. ]; then \
+ 		$(CP) $(GENERIC_PLATFORM_DIR)/base-files/* $(1)/; \
+ 	fi
+--- /dev/null
++++ b/package/base-files/files/lib/upgrade/signature.sh
+@@ -0,0 +1,6 @@
++# 8devices CRA/RED: installed by base-files when CONFIG_REQUIRE_IMAGE_SIGNATURE
++# is set. Sourced after platform.sh by `include /lib/upgrade`, so it applies
++# to every target built from this tree: sysupgrade refuses an image whose
++# usign/ucert signature is missing, invalid or made with a key that is not in
++# /etc/opkg/keys. `sysupgrade -F` on the console overrides it.
++REQUIRE_IMAGE_SIGNATURE=1
+--- a/package/base-files/files/sbin/sysupgrade
++++ b/package/base-files/files/sbin/sysupgrade
+@@ -357,12 +357,30 @@ if [ -n "$CONF_RESTORE" ]; then
+ 
+ 	[ "$VERBOSE" -gt 1 ] && TAR_V="v" || TAR_V=""
+ 	v "Restoring config files..."
++	# 8devices CRA/RED: a restored backup must not change the trust roots of
++	# sysupgrade (/etc/opkg/keys) and apk (/etc/apk/keys). Snapshot them and
++	# put them back afterwards; -F skips this.
++	trust_keys=
++	[ "$FORCE" = 1 ] || {
++		trust_keys=$(mktemp -d /tmp/trust-keys.XXXXXX)
++		for d in etc/opkg/keys etc/apk/keys; do
++			[ -d "/$d" ] && mkdir -p "$trust_keys/$d" && cp -a "/$d/." "$trust_keys/$d/"
++		done
++	}
+ 	if [ "$(type -t platform_restore_backup)" == 'platform_restore_backup' ]; then
+ 		platform_restore_backup "$TAR_V"
+ 	else
+ 		tar -C / -x${TAR_V}zf "$CONF_RESTORE"
+ 	fi
+-	exit $?
++	rc=$?
++	[ -n "$trust_keys" ] && {
++		for d in etc/opkg/keys etc/apk/keys; do
++			rm -rf "/$d"
++			[ -d "$trust_keys/$d" ] && mkdir -p "/$d" && cp -a "$trust_keys/$d/." "/$d/"
++		done
++		rm -rf "$trust_keys"
++	}
++	exit $rc
+ fi
+ 
+ type platform_check_image >/dev/null 2>/dev/null || {
+--- /dev/null
++++ b/package/system/ucert/patches/001-issue-validity-options.patch
+@@ -0,0 +1,99 @@
++diff --git a/ucert.c b/ucert.c
++index 5523b02..0ae3fdc 100644
++--- a/ucert.c
+++++ b/ucert.c
++@@ -441,7 +441,8 @@ static int cert_dump(const char *certfile) {
++ }
++ 
++ /* issue an auth certificate for pubkey */
++-static int cert_issue(const char *certfile, const char *pubkeyfile, const char *seckeyfile) {
+++static int cert_issue(const char *certfile, const char *pubkeyfile, const char *seckeyfile,
+++		      time_t validfrom, time_t expiresat) {
++ 	struct blob_buf payloadbuf = {0};
++ 	struct blob_buf certbuf = {0};
++ 	struct timeval tv;
++@@ -476,11 +477,17 @@ static int cert_issue(const char *certfile, const char *pubkeyfile, const char *
++ 		blob_buf_init(&payloadbuf, 0);
++ 		c = blobmsg_open_table(&payloadbuf, "ucert");
++ 		blobmsg_add_u32(&payloadbuf, "certtype", revoker?CERTTYPE_REVOKE:CERTTYPE_AUTH);
++-		blobmsg_add_u64(&payloadbuf, "validfrom", tv.tv_sec);
++ 		if (!revoker) {
++-			blobmsg_add_u64(&payloadbuf, "expiresat", tv.tv_sec + 60 * 60 * 24 * 365);
+++			/* validity defaults: from now, for one year */
+++			if (!validfrom)
+++				validfrom = tv.tv_sec;
+++			if (!expiresat)
+++				expiresat = validfrom + 60 * 60 * 24 * 365;
+++			blobmsg_add_u64(&payloadbuf, "validfrom", validfrom);
+++			blobmsg_add_u64(&payloadbuf, "expiresat", expiresat);
++ 			blobmsg_add_string(&payloadbuf, "pubkey", pkb);
++ 		} else {
+++			blobmsg_add_u64(&payloadbuf, "validfrom", tv.tv_sec);
++ 			blobmsg_add_string(&payloadbuf, "fingerprint", pkfp);
++ 		}
++ 
++@@ -636,6 +643,8 @@ static int usage(const char *cmd)
++ 		"  -A:			append signature (needs -c and -x)\n"
++ 		"  -D:			dump (needs -c)\n"
++ 		"  -I:			issue cert and revoker (needs -c and -p and -s)\n"
+++		"			(optional -f <validfrom> -e <expiresat>, unix epoch;\n"
+++		"			 default: from now for one year)\n"
++ #endif /* UCERT_FULL */
++ 		"  -R:			process revoker certificate (needs -c and -P)\n"
++ 		"  -V:			verify (needs -c and -p|-P, may have -m)\n"
++@@ -647,6 +656,8 @@ static int usage(const char *cmd)
++ 		"  -q:			quiet (do not print verification result, use return code only)\n"
++ #ifdef UCERT_FULL
++ 		"  -s <file>:		secret key file (issue only)\n"
+++		"  -f <epoch>:		certificate valid from (issue only)\n"
+++		"  -e <epoch>:		certificate expires at (issue only)\n"
++ 		"  -x <file>:		signature file (append only)\n"
++ #endif /* UCERT_FULL */
++ 		"\n",
++@@ -665,13 +676,15 @@ int main(int argc, char *argv[]) {
++ #ifdef UCERT_FULL
++ 	const char *sigfile = NULL;
++ 	const char *seckeyfile = NULL;
+++	time_t validfrom = 0;
+++	time_t expiresat = 0;
++ #endif
++ 
++ 	quiet = false;
++ 	while ((ch = getopt(argc, argv,
++ 		"RVc:m:p:P:q"
++ #ifdef UCERT_FULL
++-		"ADIs:x:"
+++		"ADIs:x:f:e:"
++ #endif
++ 	       )) != -1) {
++ 		switch (ch) {
++@@ -733,6 +746,20 @@ int main(int argc, char *argv[]) {
++ 				return usage(argv[0]);
++ 			seckeyfile = optarg;
++ 			break;
+++		case 'f':
+++			if (cmd != CMD_ISSUE || cmd == CMD_NONE)
+++				return usage(argv[0]);
+++			validfrom = (time_t)strtoll(optarg, NULL, 10);
+++			if (validfrom <= 0)
+++				return usage(argv[0]);
+++			break;
+++		case 'e':
+++			if (cmd != CMD_ISSUE || cmd == CMD_NONE)
+++				return usage(argv[0]);
+++			expiresat = (time_t)strtoll(optarg, NULL, 10);
+++			if (expiresat <= 0)
+++				return usage(argv[0]);
+++			break;
++ 		case 'x':
++ 			if (sigfile || cmd != CMD_APPEND || cmd == CMD_NONE)
++ 				return usage(argv[0]);
++@@ -758,7 +785,7 @@ int main(int argc, char *argv[]) {
++ 			return usage(argv[0]);
++ 	case CMD_ISSUE:
++ 		if (certfile && pubkeyfile && seckeyfile)
++-			return cert_issue(certfile, pubkeyfile, seckeyfile);
+++			return cert_issue(certfile, pubkeyfile, seckeyfile, validfrom, expiresat);
++ 		else
++ 			return usage(argv[0]);
++ #endif

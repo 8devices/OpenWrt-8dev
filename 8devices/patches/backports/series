@@ -1,0 +1,4 @@
+# Upstream fixes carried between re-pins (CVE backports), applied before the
+# openwrt series. Normally empty: see docs/maintenance.md "Security fixes between re-pins".
+# One line per patch, in order; the patch header names the CVE, the upstream
+# commit and the affected packages/boards.

@@ -1,0 +1,46 @@
+From: Robertas Tumas <robertas.t@8devices.com>
+Subject: [PATCH] image: record the overlay patches in the CycloneDX SBOM
+
+The SBOM written by Build/mkfs (JSON_CYCLONEDX_SBOM) lists every package
+with its upstream version. The 8devices overlay changes some of those
+packages with quilt series applied before the build, which the version can
+never show: base-files keeps the upstream commit count, luci-* keep the
+upstream luci commit, so the SBOM claims pristine upstream for content
+that differs.
+
+CycloneDX has the construct for exactly this: a component "pedigree"
+whose "patches" list declares that the component is upstream plus the
+given diffs. After the SBOM is generated, run the overlay's
+sbom-pedigree.py (8devices/scripts/, only when present, so an
+ImageBuilder or a tree without the overlay is unaffected). It reads the
+applied quilt series (8devices/.pc/<series>/applied-patches, or the
+whole series file when there is no quilt state), maps every +++ path of
+every patch to the package owning it via .packageinfo (feed packages
+through their package/feeds symlink), and adds a pedigree with the patch
+paths to those components. Patches that touch no package (tools, build
+system, image recipes) are recorded on metadata.component, the firmware
+image itself. The Kiwi board file the overlay installs (data, not a
+patch) gets a pedigree note with its md5 on ipq-wifi-8devices_kiwi. The
+script is idempotent and leaves the rest of the SBOM untouched.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Robertas Tumas <robertas.t@8devices.com>
+---
+ include/image.mk | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/include/image.mk b/include/image.mk
+index f65a835a1a..1839ba6831 100644
+--- a/include/image.mk
++++ b/include/image.mk
+@@ -353,6 +353,10 @@ ifneq ($(CONFIG_JSON_CYCLONEDX_SBOM),)
+ 		$(if $(IB),$(TOPDIR)/.packageinfo, $(TMP_DIR)/.packageinfo) \
+ 		$(BIN_DIR)/$(IMG_PREFIX)$(if $(PROFILE_SANITIZED),-$(PROFILE_SANITIZED)).manifest > \
+ 		$(BIN_DIR)/$(IMG_PREFIX)$(if $(PROFILE_SANITIZED),-$(PROFILE_SANITIZED)).bom.cdx.json
++	$(if $(wildcard $(TOPDIR)/8devices/scripts/sbom-pedigree.py), \
++		$(TOPDIR)/8devices/scripts/sbom-pedigree.py --overlay $(TOPDIR)/8devices \
++			--packageinfo $(if $(IB),$(TOPDIR)/.packageinfo, $(TMP_DIR)/.packageinfo) \
++			$(BIN_DIR)/$(IMG_PREFIX)$(if $(PROFILE_SANITIZED),-$(PROFILE_SANITIZED)).bom.cdx.json)
+ endif
+ endef
+ 

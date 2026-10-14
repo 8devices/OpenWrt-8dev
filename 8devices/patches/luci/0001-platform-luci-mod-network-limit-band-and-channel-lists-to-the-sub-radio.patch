@@ -1,0 +1,93 @@
+From: Robertas Tumas <robertas.t@8devices.com>
+Subject: [PATCH] luci-mod-network: limit band and channel lists to the configured sub-radio
+
+On multi-radio phys (cfg80211 "radios", e.g. QCN9274 with a 2.4 GHz and a
+5/6 GHz sub-radio) iwinfo reports the capabilities of the whole phy, so
+the wireless device dialog offers every band of the chip for each
+sub-radio. Selecting a band the sub-radio cannot serve makes hostapd fail
+at start.
+
+"wifi detect" already records each sub-radio's frequency ranges in
+/etc/board.json (wlan.<phy>.info.radios[].freq_ranges). Fetch board.json
+through the existing luci getBoardJSON rpc and, when the wifi-device
+carries "option radio", keep only the frequencies inside that
+sub-radio's ranges before building the band and channel menus. Devices
+without "option radio" are unaffected.
+
+Written for 8devices Kiwi-DVK (IPQ9574 + QCN9274 wideband), where the
+2.4 GHz sub-radio should offer 2.4 GHz only and the wideband sub-radio
+5 and 6 GHz. Tested on Kiwi-DVK 2026-10-01 (luci 07bca003): the two
+sub-radios show only their own bands, the two single-radio Noni cards are
+unchanged. The board.json RPC lives on the "luci-rpc" ubus object (not
+"luci"); the first draft used the wrong object and the filter was skipped
+silently.
+
+Assisted-by: Claude:claude-opus-5-5
+Signed-off-by: Robertas Tumas <robertas.t@8devices.com>
+---
+diff --git a/modules/luci-mod-network/htdocs/luci-static/resources/view/network/wireless.js b/modules/luci-mod-network/htdocs/luci-static/resources/view/network/wireless.js
+index c99fa07..20256b7 100644
+--- a/modules/luci-mod-network/htdocs/luci-static/resources/view/network/wireless.js
++++ b/modules/luci-mod-network/htdocs/luci-static/resources/view/network/wireless.js
+@@ -329,11 +329,42 @@ var CBIWifiFrequencyValue = form.Value.extend({
+ 		expect: { results: [] }
+ 	}),
+ 
++	// board.json carries the per-sub-radio frequency ranges written by
++	// "wifi detect" (wlan.<phy>.info.radios[].freq_ranges, in kHz)
++	callBoardJSON: rpc.declare({
++		object: 'luci-rpc',
++		method: 'getBoardJSON'
++	}),
++
++	// Return the frequency ranges of the sub-radio a wifi-device is bound to
++	// (option radio), or null when the device is not a multi-radio phy.
++	getRadioFreqRanges: function(section_id, board) {
++		const radio = uci.get('wireless', section_id, 'radio');
++		const path = uci.get('wireless', section_id, 'path');
++
++		if (radio == null || !path || !L.isObject(board) || !L.isObject(board.wlan))
++			return null;
++
++		for (const phy in board.wlan) {
++			const ent = board.wlan[phy];
++
++			if (!L.isObject(ent) || ent.path != path || !L.isObject(ent.info))
++				continue;
++
++			const r = L.toArray(ent.info.radios).filter(x => x && String(x.index) == String(radio))[0];
++
++			return (r && Array.isArray(r.freq_ranges) && r.freq_ranges.length) ? r.freq_ranges : null;
++		}
++
++		return null;
++	},
++
+ 	// Load method to fetch WiFi device details and frequency list
+ 	load: function(section_id) {
+ 		return Promise.all([
+ 			network.getWifiDevice(section_id),
+-			this.callFrequencyList(section_id)
++			this.callFrequencyList(section_id),
++			L.resolveDefault(this.callBoardJSON(), {})
+ 		]).then(L.bind(function(data) {
+ 			this.channels = {
+ 				'2g': L.hasSystemFeature('hostapd', 'acs') ? [ 'auto', 'auto', { available: true } ] : [],
+@@ -342,7 +373,16 @@ var CBIWifiFrequencyValue = form.Value.extend({
+ 				'60g': []
+ 			};
+ 			const wifidevs = data[0];
+-			const freqlist = data[1];
++			let freqlist = data[1];
++
++			// On a multi-radio phy (e.g. QCN9274 with a 2.4 GHz and a 5/6 GHz
++			// sub-radio) iwinfo reports the frequencies of the whole phy. Keep
++			// only those the configured sub-radio can actually use, so that the
++			// band and channel menus do not offer what hostapd will reject.
++			const ranges = this.getRadioFreqRanges(section_id, data[2]);
++
++			if (ranges)
++				freqlist = freqlist.filter(freq => ranges.some(r => freq.mhz * 1000 >= r[0] && freq.mhz * 1000 <= r[1]));
+ 
+ 			freqlist.forEach(freq => {
+ 				if (!freq.band)
